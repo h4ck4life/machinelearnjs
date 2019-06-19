@@ -31,7 +31,8 @@ import { validateFeaturesConsistency, validateFitInputs, validateMatrix1D } from
  *
  */
 export class LogisticRegression {
-  private weights: tf.Tensor1D;
+  private weightsTensor: tf.Tensor1D;
+  private weightsArray: number[];
   private learningRate: number;
   private numIterations: number;
 
@@ -56,37 +57,77 @@ export class LogisticRegression {
   }
 
   /**
-   * Fit the model according to the given training data.
+   * Fit the model synchronously according to the given training data.
    * @param X - A matrix of samples
    * @param y - A matrix of targets
+   * @returns Tensor of the underlying model.
    */
-  public fit(X: Type2DMatrix<number> | Type1DMatrix<number> = null, y: Type1DMatrix<number> = null): void {
-    const xWrapped = ensure2DMatrix(X);
-    validateFitInputs(xWrapped, y);
-    this.initWeights(xWrapped);
-    const tensorX = tf.tensor2d(xWrapped);
-    const tensorY = tf.tensor1d(y);
+  public fit(
+    X: Type2DMatrix<number> | Type1DMatrix<number> = null,
+    y: Type1DMatrix<number> = null,
+  ): tf.Tensor<tf.Rank> {
+    this.fitInternal(X, y);
 
-    for (let i = 0; i < this.numIterations; ++i) {
-      const predictions: tf.Tensor<tf.Rank> = tf.sigmoid(tensorX.dot(this.weights));
+    this.weightsArray = this.weightsTensor.arraySync();
 
-      const gradient: tf.Tensor<tf.Rank> = tf.mul(tensorY.sub(predictions).dot(tensorX), -1);
-      this.weights = this.weights.sub(tf.mul(this.learningRate, gradient));
-    }
+    return this.weightsTensor;
   }
 
   /**
-   * Predict class labels for samples in X.
+   * Fit the model asynchronously according to the given training data.
+   * @param X - A matrix of samples
+   * @param y - A matrix of targets
+   * @returns Promise that resolves to tensor of the underlying model.
+   *  predict or predictAsync should be called only after the returned promise is resolved.
+   */
+  public async fitAsync(
+    X: Type2DMatrix<number> | Type1DMatrix<number> = null,
+    y: Type1DMatrix<number> = null,
+  ): Promise<tf.Tensor<tf.Rank>> {
+    this.fitInternal(X, y);
+
+    this.weightsArray = await this.weightsTensor.array();
+
+    return this.weightsTensor;
+  }
+
+  /**
+   * Synchronously predict class labels for samples in X.
    * @param X - A matrix of test data
    * @returns An array of predicted classes
    */
   public predict(X: Type2DMatrix<number> | Type1DMatrix<number> = null): number[] {
-    validateFeaturesConsistency(X, this.weights.arraySync());
+    validateFeaturesConsistency(X, this.weightsArray);
 
     const xWrapped: Type2DMatrix<number> = ensure2DMatrix(X);
 
-    const syncResult = tf.round(tf.sigmoid(tf.tensor2d(xWrapped).dot(this.weights))).arraySync();
-    return validateMatrix1D(syncResult);
+    const result = this.getPredictionTensor(tf.tensor2d(xWrapped), this.weightsTensor).arraySync();
+
+    return validateMatrix1D(result);
+  }
+
+  /**
+   * Asynchronously predict class labels for samples in X.
+   * @param X - A matrix of test data
+   * @returns Promise of an array of predicted classes
+   */
+  public async predictAsync(X: Type2DMatrix<number> | Type1DMatrix<number> = null): Promise<number[]> {
+    validateFeaturesConsistency(X, this.weightsArray);
+
+    const xWrapped: Type2DMatrix<number> = ensure2DMatrix(X);
+
+    const result = await this.getPredictionTensor(tf.tensor2d(xWrapped), this.weightsTensor).array();
+
+    return validateMatrix1D(result);
+  }
+
+  /**
+   * Directly retrieves the prediction tensor
+   * @param X
+   * @param weightsTensor
+   */
+  public getPredictionTensor(X: tf.Tensor<tf.Rank>, weightsTensor: tf.Tensor<tf.Rank>) {
+    return tf.round(tf.sigmoid(X.dot(weightsTensor)));
   }
 
   /**
@@ -94,16 +135,21 @@ export class LogisticRegression {
    */
   public toJSON(): {
     /**
-     * Model training weights
+     * Model training weightsTensor
      */
-    weights: number[];
+    weightsTensor: tf.Tensor<tf.Rank>;
+    /**
+     * Model training weightsArray
+     */
+    weightsArray: number[];
     /**
      * Model learning rate
      */
     learning_rate: number;
   } {
     return {
-      weights: this.weights.arraySync(),
+      weightsTensor: this.weightsTensor,
+      weightsArray: this.weightsArray,
       learning_rate: this.learningRate,
     };
   }
@@ -114,22 +160,29 @@ export class LogisticRegression {
   public fromJSON(
     {
       /**
-       * Model training weights
+       * Model training weightsTensor
        */
-      weights = null,
+      weightsTensor = null,
+      /**
+       * Model training weightsArray
+       */
+      weightsArray = null,
       /**
        * Model learning rate
        */
       learning_rate = null,
     }: {
-      weights: number[];
+      weightsTensor: tf.Tensor<tf.Rank.R1>;
+      weightsArray: number[];
       learning_rate: number;
     } = {
-      weights: null,
+      weightsTensor: null,
+      weightsArray: null,
       learning_rate: 0.001,
     },
   ): void {
-    this.weights = tf.tensor1d(weights);
+    this.weightsTensor = weightsTensor;
+    this.weightsArray = weightsArray;
     this.learningRate = learning_rate;
   }
 
@@ -137,6 +190,21 @@ export class LogisticRegression {
     const shape: number[] = inferShape(X);
     const numFeatures: number = shape[1];
     const limit: number = 1 / Math.sqrt(numFeatures);
-    this.weights = tf.randomUniform([numFeatures], -limit, limit);
+    this.weightsTensor = tf.randomUniform([numFeatures], -limit, limit);
+  }
+
+  private fitInternal(X: Type2DMatrix<number> | Type1DMatrix<number> = null, y: Type1DMatrix<number> = null): void {
+    const xWrapped = ensure2DMatrix(X);
+    validateFitInputs(xWrapped, y);
+    this.initWeights(xWrapped);
+    const tensorX = tf.tensor2d(xWrapped);
+    const tensorY = tf.tensor1d(y);
+
+    for (let i = 0; i < this.numIterations; ++i) {
+      const predictions: tf.Tensor<tf.Rank> = tf.sigmoid(tensorX.dot(this.weightsTensor));
+
+      const gradient: tf.Tensor<tf.Rank> = tf.mul(tensorY.sub(predictions).dot(tensorX), -1);
+      this.weightsTensor = this.weightsTensor.sub(tf.mul(this.learningRate, gradient));
+    }
   }
 }
